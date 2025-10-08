@@ -1,113 +1,171 @@
-Remake this code better for my indicator for editor pine on trading view   : //@version=6
-indicator("TradeQuest – Final (Entry Lock, PnL% HUD, Target, XP Bar, Triangles)", overlay=true)
+//@version=6
+indicator("TradeQuest – Final (Entry Lock, PnL% HUD, Target, XP Bar, Triangles)", overlay=true, shorttitle="TradeQuest")
+
+// ================== Utility helpers ==================
+clamp(float value, float minValue, float maxValue) => math.min(math.max(value, minValue), maxValue)
+percent(float reference, float value) => reference != 0 ? (value / reference) - 1.0 : 0.0
+
+fmtPercent(float value) => na(value) ? "—" : str.tostring(value, format.percent)
+fmtPrice(float value) => na(value) ? "—" : str.tostring(value, format.mintick)
+fmtNumber(float value, string pattern) => na(value) ? "—" : str.tostring(value, pattern)
+
+ensureLine(line ln, float x1, float y1, float x2, float y2, color col, int width, extend extendMode) =>
+    if na(ln)
+        line.new(x1, y1, x2, y2, extend=extendMode, width=width, color=col)
+    else
+        line.set_xy1(ln, x1, y1)
+        line.set_xy2(ln, x2, y2)
+        line.set_color(ln, col)
+        line.set_width(ln, width)
+        ln
+
+ensureLabel(label lb, float x, float y, string text, color txtCol, color bgCol, label_style style) =>
+    if not na(lb)
+        label.delete(lb)
+    label.new(x, y, text, xloc=xloc.bar_index, yloc=yloc.price, textcolor=txtCol, color=bgCol, style=style)
+
+resolvePosition(string pos) =>
+    switch pos
+        "Top Right"      => position.top_right
+        "Top Left"       => position.top_left
+        "Bottom Right"   => position.bottom_right
+        "Bottom Left"    => position.bottom_left
+        => position.top_right
 
 // ================== Inputs ==================
-bool  themeDark       = input.bool(true,  "Dark theme")
-bool  showPanel       = input.bool(true,  "Show compact panel")
-bool  showXP          = input.bool(true,  "Show XP bar")
-string charName       = input.string("Player", "Character name")
+var string grpTheme   = "Theme"
+var string grpEntry   = "Entry"
+var string grpPanel   = "Panel"
+var string grpPnL     = "PnL HUD"
+var string grpTarget  = "Target HUD"
+var string grpStop    = "Stop HUD"
+var string grpXP      = "XP Bar"
+var string grpTri     = "Triangles"
 
-// Entry
-bool  syncToLast      = input.bool(false, "Set entry = last close (one time)")
-bool  usePickEntry    = input.bool(false, "Use manual entry")
-float pickEntry       = input.float(0.0,  "Manual entry price")
-bool  useDragEntry    = input.bool(true,  "Draggable entry (teal)")
-float entryFallback   = input.float(20.0, "Fallback entry (used once if needed)")
-bool  resetEntryNow   = input.bool(false, "Reset entry (applies next bar)")
+bool  themeDark       = input.bool(true,  "Dark theme",                 group=grpTheme)
+bool  showPanel       = input.bool(true,  "Show compact panel",         group=grpPanel)
+string panelPosStr    = input.string("Top Right", "Panel position", options=["Top Right","Top Left","Bottom Right","Bottom Left"], group=grpPanel)
+bool  showXP          = input.bool(true,  "Show XP bar",                group=grpXP)
+string charName       = input.string("Player", "Character name",        group=grpXP)
 
-int   qty             = input.int(110, "Qty (visual only)", minval=1)
+bool  syncToLast      = input.bool(false, "Set entry = last close (one time)", group=grpEntry)
+bool  usePickEntry    = input.bool(false, "Use manual entry",                 group=grpEntry)
+float pickEntry       = input.float(0.0,  "Manual entry price",               group=grpEntry, step=syminfo.mintick)
+bool  useDragEntry    = input.bool(true,  "Draggable entry (teal)",           group=grpEntry)
+float entryFallback   = input.float(20.0, "Fallback entry (used once if needed)", group=grpEntry)
+bool  resetEntryNow   = input.bool(false, "Reset entry (applies next bar)",      group=grpEntry)
+int   qty             = input.int(110, "Qty (visual only)", minval=1, group=grpEntry)
 
-// PnL HUD
-int   snapTicks       = input.int(6, "PnL magnet to entry (ticks)", minval=0, maxval=50)
+int   snapTicks       = input.int(6, "PnL magnet to entry (ticks)", minval=0, maxval=50, group=grpPnL)
+bool  showTarget      = input.bool(true, "Show target HUD", group=grpTarget)
+float defaultTargetPct = input.float(10.0, "Default target % from entry", step=0.1, group=grpTarget)
 
-// Target HUD
-float defaultTargetPct = input.float(10.0, "Default target % from entry", step=0.1)
+bool  showStop        = input.bool(true, "Show stop HUD", group=grpStop)
+float defaultStopPct  = input.float(5.0, "Default stop % from entry", step=0.1, minval=0.0, group=grpStop)
 
-// XP bar
-int    xpSegments     = input.int(30, "XP segments", minval=10, maxval=80)
-bool   xpTicks        = input.bool(true, "XP tick marks (every ~10%)")
-int    flashBars      = input.int(8, "Flash bars on level up", minval=0, maxval=50)
-string xpPosStr       = input.string("Top Right", "XP bar position", options=["Top Right","Top Left","Bottom Right","Bottom Left"])
-int    baseXPPer10p   = input.int(3000, "XP for +10% return")
-float  levelScalar    = input.float(1.35, "Level difficulty growth")
+int    xpSegments     = input.int(30, "XP segments", minval=10, maxval=80, group=grpXP)
+bool   xpTicks        = input.bool(true, "XP tick marks (every ~10%)", group=grpXP)
+int    flashBars      = input.int(8, "Flash bars on level up", minval=0, maxval=50, group=grpXP)
+string xpPosStr       = input.string("Top Right", "XP bar position", options=["Top Right","Top Left","Bottom Right","Bottom Left"], group=grpXP)
+int    baseXPPer10p   = input.int(3000, "XP for +10% return", group=grpXP)
+float  levelScalar    = input.float(1.35, "Level difficulty growth", group=grpXP)
 
-// Triangles
-bool  enableTriangle  = input.bool(true, "Enable asymmetric triangle detector")
-int   pivotLen        = input.int(4, "Pivot length", minval=2, maxval=20)
-int   minBarsSpan     = input.int(12, "Min bars between pivot pairs", minval=6, maxval=300)
-bool  triShowLines    = input.bool(true, "Draw triangle trendlines")
-bool  triShowLabels   = input.bool(true, "Show breakout labels")
+bool  enableTriangle  = input.bool(true, "Enable asymmetric triangle detector", group=grpTri)
+int   pivotLen        = input.int(4, "Pivot length", minval=2, maxval=20, group=grpTri)
+int   minBarsSpan     = input.int(12, "Min bars between pivot pairs", minval=6, maxval=300, group=grpTri)
+bool  triShowLines    = input.bool(true, "Draw triangle trendlines", group=grpTri)
+bool  triShowLabels   = input.bool(true, "Show breakout labels", group=grpTri)
 
 // ================== Theme ==================
 color bgBase   = themeDark ? color.new(color.black, 82) : color.new(color.white, 0)
 color textC    = themeDark ? color.white : color.black
-color subGray  = themeDark ? color.gray  : color.rgb(85,85,85)
+color subGray  = themeDark ? color.gray  : color.rgb(85, 85, 85)
 color posCol   = color.lime
 color negCol   = color.red
 
-// XP palette
-color goldFill     = color.rgb(214,175,64)
-color goldFillLite = color.rgb(240,208,96)
-color goldEmpty    = themeDark ? color.rgb(60,50,30) : color.rgb(230,220,200)
-color goldBorder   = color.rgb(160,140,100)
+color goldFill     = color.rgb(214, 175, 64)
+color goldFillLite = color.rgb(240, 208, 96)
+color goldEmpty    = themeDark ? color.rgb(60, 50, 30) : color.rgb(230, 220, 200)
+color goldBorder   = color.rgb(160, 140, 100)
+color hudBg        = color.new(color.black, 70)
+color rewardCol    = color.rgb(0, 186, 255)
+color riskCol      = color.rgb(255, 99, 132)
+color warnCol      = color.rgb(255, 204, 0)
 
 // ================== Entry (lock once) ==================
 var float entry  = na
 var line  eLine  = na
 var bool  locked = false
+var float prevEntry = na
+var float bestClose = na
+var float worstClose = na
+var int   entryBar  = na
+var int   entryDir  = 0
 
 if resetEntryNow and barstate.isnew
     entry  := na
     locked := false
+    bestClose := na
+    worstClose := na
+    entryBar := na
+    entryDir := 0
     if not na(eLine)
         line.delete(eLine)
         eLine := na
 
-if na(eLine)
-    eLine := line.new(bar_index-1, nz(entry, close), bar_index, nz(entry, close), extend=extend.right, width=2, color=color.new(color.teal, 0))
+eLine := ensureLine(eLine, bar_index - 1, nz(entry, close), bar_index, nz(entry, close), color.new(color.teal, 0), 2, extend.right)
 
-if barstate.isnew
-    if not locked
-        if syncToLast
-            entry := close
-        else
-            if usePickEntry and (pickEntry > 0)
-                entry := pickEntry
-            else
-                if useDragEntry
-                    entry := line.get_y1(eLine)
-                else
-                    if na(entry)
-                        entry := entryFallback
-        locked := not na(entry)
-    // keep line in sync
+if barstate.isnew and not locked
+    if syncToLast
+        entry := close
+    else if usePickEntry and pickEntry > 0
+        entry := pickEntry
+    else if useDragEntry
+        entry := line.get_y1(eLine)
+    else if na(entry)
+        entry := entryFallback
+    locked := not na(entry)
+
+if barstate.isnew and not na(entry)
     line.set_y1(eLine, entry)
     line.set_y2(eLine, entry)
-    line.set_x1(eLine, bar_index-1)
+    line.set_x1(eLine, bar_index - 1)
     line.set_x2(eLine, bar_index)
 
-// ================== Profit % from ENTRY (stable) ==================
-float profitPct = entry != 0 ? (close/entry - 1.0) : 0.0
-color profitCol = profitPct >= 0 ? posCol : negCol
-string profitEmoji = profitPct >= 0 ? "🐂" : "🐻"
-float pnlCash  = (close - entry) * qty
+bool entryChanged = false
+if barstate.isnew
+    float prevEntryValue = prevEntry
+    bool prevWasNa = na(prevEntryValue)
+    bool currIsNa = na(entry)
+    entryChanged := (prevWasNa != currIsNa) or (not currIsNa and not prevWasNa and entry != prevEntryValue)
+    prevEntry := entry
+    if entryChanged
+        if currIsNa
+            bestClose := na
+            worstClose := na
+            entryBar := na
+            entryDir := 0
+        else
+            bestClose := entry
+            worstClose := entry
+            entryBar := bar_index
+            entryDir := close >= entry ? 1 : -1
 
-// ================== Compact panel ==================
-if showPanel
-    var table pnl = table.new(position.top_right, 4, 3, border_width=1, border_color=color.new(textC, 60))
-    if barstate.islast
-        table.cell(pnl, 0, 0, "TradeQuest " + profitEmoji, text_color=textC, text_size=size.normal, bgcolor=bgBase)
-        table.cell(pnl, 0, 1, "Entry", text_color=subGray, bgcolor=bgBase)
-        table.cell(pnl, 1, 1, str.tostring(entry, format.mintick), text_color=textC, bgcolor=bgBase)
-        table.cell(pnl, 2, 1, "Last",  text_color=subGray, bgcolor=bgBase)
-        table.cell(pnl, 3, 1, str.tostring(close, format.mintick), text_color=textC, bgcolor=bgBase)
-        table.cell(pnl, 0, 2, "Profit %", text_color=subGray, bgcolor=bgBase)
-        table.cell(pnl, 1, 2, str.tostring(profitPct, format.percent), text_color=profitCol, text_size=size.large, bgcolor=bgBase)
+if barstate.isnew and not na(entry)
+    bestClose := na(bestClose) ? entry : math.max(bestClose, close)
+    worstClose := na(worstClose) ? entry : math.min(worstClose, close)
+
+float profitPct = not na(entry) ? percent(entry, close) : na
+float bestProfitPct = not na(entry) and not na(bestClose) ? percent(entry, bestClose) : na
+float worstProfitPct = not na(entry) and not na(worstClose) ? percent(entry, worstClose) : na
+float drawdownPct = not na(bestClose) ? percent(bestClose, close) : na
+color profitCol = na(profitPct) ? subGray : profitPct >= 0 ? posCol : negCol
+string profitEmoji = na(profitPct) ? "⏳" : profitPct >= 0 ? "🐂" : "🐻"
+float pnlCash  = not na(entry) ? (close - entry) * qty : na
 
 // ================== PnL HUD (independent; snap only to entry) ==================
 var line pnlHandle = na
-if na(pnlHandle)
-    pnlHandle := line.new(bar_index-20, close, bar_index, close, extend=extend.none, width=2, color=color.new(color.gray, 0))
+pnlHandle := ensureLine(pnlHandle, bar_index - 20, close, bar_index, close, color.new(color.gray, 0), 2, extend.none)
 if barstate.isnew
     line.set_x2(pnlHandle, bar_index)
 
@@ -117,94 +175,267 @@ if math.abs(pnlY - entry) <= snapBand
     pnlY := entry
     line.set_y2(pnlHandle, entry)
 
-float pnlHUDpct = entry != 0 ? (pnlY/entry - 1.0) : 0.0
-bool  pnlPos    = pnlHUDpct >= 0
-color pnlCol    = pnlPos ? posCol : negCol
+float pnlHUDpct = not na(entry) ? percent(entry, pnlY) : na
+bool  pnlPos    = not na(pnlHUDpct) and pnlHUDpct >= 0
+color pnlCol    = na(pnlHUDpct) ? subGray : pnlPos ? posCol : negCol
 line.set_color(pnlHandle, pnlCol)
-line.set_width(pnlHandle, pnlPos ? 3 : 2)
+line.set_width(pnlHandle, na(pnlHUDpct) ? 1 : pnlPos ? 3 : 2)
 
 var label pnlTag = na
 if barstate.islast
-    if not na(pnlTag)
-        label.delete(pnlTag)
-    string t = (pnlPos ? "🐂 " : "🐻 ") + str.tostring(pnlHUDpct, format.percent)
-    // * IMPORTANT: parenthesis is closed on the same line (no continuation needed) *
-    pnlTag := label.new(bar_index, pnlY, t, xloc=xloc.bar_index, yloc=yloc.price, textcolor=pnlCol, color=color.new(color.black, 70), style=label.style_label_left)
+    string pnlText = na(pnlHUDpct) ? "⏳ Waiting" : (pnlPos ? "🐂 " : "🐻 ") + fmtPercent(pnlHUDpct)
+    if not na(bestProfitPct)
+        pnlText += " | Peak " + fmtPercent(bestProfitPct)
+    if not na(drawdownPct) and drawdownPct < 0
+        pnlText += " | DD " + fmtPercent(drawdownPct)
+    pnlTag := ensureLabel(pnlTag, bar_index, pnlY, pnlText, pnlCol, hudBg, label.style_label_left)
 
-// ================== Target HUD (independent) ==================
+// ================== Target & Stop HUDs (independent) ==================
 var line tgtHandle = na
-if na(tgtHandle)
-    float baseY = not na(entry) and entry > 0 ? entry * (1 + defaultTargetPct/100.0) : close * (1 + defaultTargetPct/100.0)
-    tgtHandle := line.new(bar_index-30, baseY, bar_index, baseY, extend=extend.none, width=2, color=color.new(color.fuchsia, 0))
-if barstate.isnew
-    line.set_x2(tgtHandle, bar_index)
-
-float tgtY   = line.get_y2(tgtHandle)
-float tgtPct = entry != 0 ? (tgtY/entry - 1.0) : 0.0
-
 var label tgtTag = na
-if barstate.islast
+float tgtY = na
+float tgtPct = na
+
+if showTarget
+    int tgtDir = entryDir
+    if tgtDir == 0 and not na(entry)
+        tgtDir := close >= entry ? 1 : -1
+    if tgtDir == 0
+        tgtDir := close >= nz(entry, close) ? 1 : -1
+    float dirMult = tgtDir >= 0 ? 1.0 : -1.0
+    float tgtDefault = not na(entry) ? entry * (1 + dirMult * defaultTargetPct / 100.0) : close * (1 + dirMult * defaultTargetPct / 100.0)
+    float prevTgt = not na(tgtHandle) ? line.get_y2(tgtHandle) : na
+    float tgtSeed = entryChanged or na(prevTgt) ? tgtDefault : prevTgt
+    tgtHandle := ensureLine(tgtHandle, bar_index - 30, tgtSeed, bar_index, tgtSeed, rewardCol, 2, extend.none)
+    if barstate.isnew
+        line.set_x2(tgtHandle, bar_index)
+    tgtY := line.get_y2(tgtHandle)
+    tgtPct := not na(entry) ? percent(entry, tgtY) : na
+    if barstate.islast
+        string tgtText = "🎯 " + fmtPercent(tgtPct)
+        tgtTag := ensureLabel(tgtTag, bar_index, tgtY, tgtText, textC, color.new(rewardCol, 80), label.style_label_left)
+else
+    if not na(tgtHandle)
+        line.delete(tgtHandle)
+        tgtHandle := na
     if not na(tgtTag)
         label.delete(tgtTag)
-    string tTxt = "🎯 " + str.tostring(tgtPct, format.percent)
-    tgtTag := label.new(bar_index, tgtY, tTxt, xloc=xloc.bar_index, yloc=yloc.price, textcolor=color.white, color=color.new(color.black, 70), style=label.style_label_left)
+        tgtTag := na
+    tgtY := na
+    tgtPct := na
+
+var line stopHandle = na
+var label stopTag = na
+float stopY = na
+float stopPct = na
+
+if showStop
+    int stopDir = entryDir
+    if stopDir == 0 and not na(entry)
+        stopDir := close >= entry ? 1 : -1
+    if stopDir == 0
+        stopDir := close >= nz(entry, close) ? 1 : -1
+    float stopMult = stopDir >= 0 ? 1.0 : -1.0
+    float stopDefault = not na(entry) ? entry * (1 - stopMult * defaultStopPct / 100.0) : close * (1 - stopMult * defaultStopPct / 100.0)
+    float prevStop = not na(stopHandle) ? line.get_y2(stopHandle) : na
+    float stopSeed = entryChanged or na(prevStop) ? stopDefault : prevStop
+    stopHandle := ensureLine(stopHandle, bar_index - 30, stopSeed, bar_index, stopSeed, riskCol, 2, extend.none)
+    if barstate.isnew
+        line.set_x2(stopHandle, bar_index)
+    stopY := line.get_y2(stopHandle)
+    stopPct := not na(entry) ? percent(entry, stopY) : na
+    if barstate.islast
+        string stopText = "🛑 " + (na(stopPct) ? "Stop" : fmtPercent(stopPct))
+        stopTag := ensureLabel(stopTag, bar_index, stopY, stopText, textC, color.new(riskCol, 85), label.style_label_left)
+else
+    if not na(stopHandle)
+        line.delete(stopHandle)
+        stopHandle := na
+    if not na(stopTag)
+        label.delete(stopTag)
+        stopTag := na
+    stopY := na
+    stopPct := na
+
+float rewardPerShare = not na(entry) and not na(tgtY) ? tgtY - entry : na
+float riskPerShare = not na(entry) and not na(stopY) ? entry - stopY : na
+float rewardCash = not na(rewardPerShare) ? rewardPerShare * qty : na
+float riskCash = not na(riskPerShare) ? riskPerShare * qty : na
+float rewardCashAbs = not na(rewardCash) ? math.abs(rewardCash) : na
+float riskCashAbs = not na(riskCash) ? math.abs(riskCash) : na
+float rrRatio = not na(rewardCashAbs) and not na(riskCashAbs) and riskCashAbs != 0 ? rewardCashAbs / riskCashAbs : na
+float rawDistTarget = not na(tgtY) ? percent(close, tgtY) : na
+float rawDistStop = not na(stopY) ? percent(close, stopY) : na
+float distTargetPct = na(rawDistTarget) ? na : math.abs(rawDistTarget)
+float distStopPct = na(rawDistStop) ? na : math.abs(rawDistStop)
+int tradeDir = entryDir
+if not na(entry)
+    if not na(tgtY) and not na(stopY)
+        if tgtY >= entry and stopY <= entry
+            tradeDir := 1
+        else if tgtY <= entry and stopY >= entry
+            tradeDir := -1
+    if tradeDir == 0 and not na(tgtY)
+        tradeDir := tgtY >= entry ? 1 : -1
+    if tradeDir == 0 and not na(stopY)
+        tradeDir := stopY <= entry ? 1 : -1
+    if tradeDir == 0 and not na(profitPct)
+        tradeDir := profitPct >= 0 ? 1 : -1
+bool targetHit = not na(rawDistTarget) and (tradeDir >= 0 ? rawDistTarget <= 0 : rawDistTarget >= 0)
+bool stopHit = not na(rawDistStop) and (tradeDir >= 0 ? rawDistStop >= 0 : rawDistStop <= 0)
+
+// ================== Compact panel ==================
+var table pnlTable = na
+var string panelLastPos = ""
+if showPanel
+    if barstate.isfirst
+        panelLastPos := panelPosStr
+    if panelPosStr != panelLastPos or na(pnlTable)
+        if not na(pnlTable)
+            table.delete(pnlTable)
+        pnlTable := table.new(resolvePosition(panelPosStr), 4, 8, border_width=1, border_color=color.new(textC, 60))
+        panelLastPos := panelPosStr
+    if barstate.islast
+        color headerBg = targetHit ? color.new(rewardCol, 85) : stopHit ? color.new(riskCol, 85) : bgBase
+        string header = "TradeQuest " + profitEmoji
+        if targetHit
+            header += " 🎯"
+        if stopHit
+            header += " 🛑"
+        table.cell(pnlTable, 0, 0, header, text_color=textC, text_size=size.normal, bgcolor=headerBg)
+
+        table.cell(pnlTable, 0, 1, "Entry", text_color=subGray, bgcolor=bgBase)
+        table.cell(pnlTable, 1, 1, fmtPrice(entry), text_color=textC, bgcolor=bgBase)
+        table.cell(pnlTable, 2, 1, "Last", text_color=subGray, bgcolor=bgBase)
+        table.cell(pnlTable, 3, 1, fmtPrice(close), text_color=textC, bgcolor=bgBase)
+
+        table.cell(pnlTable, 0, 2, "Profit %", text_color=subGray, bgcolor=bgBase)
+        table.cell(pnlTable, 1, 2, fmtPercent(profitPct), text_color=profitCol, text_size=size.large, bgcolor=bgBase)
+        table.cell(pnlTable, 2, 2, "PnL $", text_color=subGray, bgcolor=bgBase)
+        color pnlCashCol = na(pnlCash) ? subGray : pnlCash >= 0 ? posCol : negCol
+        table.cell(pnlTable, 3, 2, fmtNumber(pnlCash, "#.##"), text_color=pnlCashCol, bgcolor=bgBase)
+
+        table.cell(pnlTable, 0, 3, "Best %", text_color=subGray, bgcolor=bgBase)
+        table.cell(pnlTable, 1, 3, fmtPercent(bestProfitPct), text_color=na(bestProfitPct) ? subGray : posCol, bgcolor=bgBase)
+        table.cell(pnlTable, 2, 3, "Worst %", text_color=subGray, bgcolor=bgBase)
+        table.cell(pnlTable, 3, 3, fmtPercent(worstProfitPct), text_color=na(worstProfitPct) ? subGray : negCol, bgcolor=bgBase)
+
+        string biasText = tradeDir > 0 ? "Long" : tradeDir < 0 ? "Short" : "Range"
+        color biasColor = tradeDir > 0 ? posCol : tradeDir < 0 ? negCol : subGray
+        table.cell(pnlTable, 0, 4, "Bias", text_color=subGray, bgcolor=bgBase)
+        table.cell(pnlTable, 1, 4, biasText, text_color=biasColor, bgcolor=bgBase)
+        table.cell(pnlTable, 2, 4, "Age", text_color=subGray, bgcolor=bgBase)
+        float barsHeld = not na(entry) and not na(entryBar) ? float(bar_index - entryBar) : na
+        table.cell(pnlTable, 3, 4, fmtNumber(barsHeld, "0"), text_color=na(barsHeld) ? subGray : textC, bgcolor=bgBase)
+
+        table.cell(pnlTable, 0, 5, "Reward $", text_color=subGray, bgcolor=bgBase)
+        color rewardBg = na(rewardCashAbs) ? bgBase : color.new(rewardCol, 85)
+        table.cell(pnlTable, 1, 5, fmtNumber(rewardCashAbs, "#.##"), text_color=na(rewardCashAbs) ? subGray : rewardCol, bgcolor=rewardBg)
+        table.cell(pnlTable, 2, 5, "Risk $", text_color=subGray, bgcolor=bgBase)
+        color riskBgCell = na(riskCashAbs) ? bgBase : color.new(riskCol, 85)
+        table.cell(pnlTable, 3, 5, fmtNumber(riskCashAbs, "#.##"), text_color=na(riskCashAbs) ? subGray : riskCol, bgcolor=riskBgCell)
+
+        table.cell(pnlTable, 0, 6, "R:R", text_color=subGray, bgcolor=bgBase)
+        color rrBg = bgBase
+        if not na(rrRatio)
+            rrBg := rrRatio >= 2 ? color.new(posCol, 80) : rrRatio >= 1 ? color.new(warnCol, 80) : color.new(riskCol, 80)
+        color rrText = na(rrRatio) ? subGray : rrRatio >= 1 ? textC : riskCol
+        table.cell(pnlTable, 1, 6, fmtNumber(rrRatio, "#.##"), text_color=rrText, bgcolor=rrBg)
+        table.cell(pnlTable, 2, 6, "Dist 🎯", text_color=subGray, bgcolor=bgBase)
+        float distTargetAbs = distTargetPct
+        color distTargetBg = targetHit ? color.new(rewardCol, 85) : bgBase
+        if not targetHit and not na(distTargetAbs) and distTargetAbs <= 0.01
+            distTargetBg := color.new(rewardCol, 90)
+        string distTargetText = na(distTargetPct) ? "—" : targetHit ? "Hit" : fmtPercent(distTargetPct)
+        color distTargetColor = targetHit ? textC : rewardCol
+        table.cell(pnlTable, 3, 6, distTargetText, text_color=distTargetColor, bgcolor=distTargetBg)
+        table.cell(pnlTable, 0, 7, "Dist 🛑", text_color=subGray, bgcolor=bgBase)
+        color distStopBg = stopHit ? color.new(riskCol, 85) : bgBase
+        if not stopHit and not na(distStopPct) and distStopPct <= 0.01
+            distStopBg := color.new(riskCol, 90)
+        string distStopText = na(distStopPct) ? "—" : stopHit ? "Hit" : fmtPercent(distStopPct)
+        color distStopColor = stopHit ? textC : riskCol
+        table.cell(pnlTable, 1, 7, distStopText, text_color=distStopColor, bgcolor=distStopBg)
+        table.cell(pnlTable, 2, 7, "Drawdown", text_color=subGray, bgcolor=bgBase)
+        color ddColor = na(drawdownPct) ? subGray : drawdownPct < 0 ? riskCol : posCol
+        table.cell(pnlTable, 3, 7, fmtPercent(drawdownPct), text_color=ddColor, bgcolor=bgBase)
+else if not na(pnlTable)
+    table.clear(pnlTable)
 
 // ================== XP bar (EverQuest style) ==================
-posFromStr(string s) =>
-    s == "Top Right" ? position.top_right :
-    s == "Top Left" ? position.top_left :
-    s == "Bottom Right" ? position.bottom_right : position.bottom_left
+float xpBasisPct = math.max(0.0, nz(bestProfitPct, nz(profitPct, 0.0)))
+float xpNow = xpBasisPct * (baseXPPer10p / 0.10)
 
-float posPct  = math.max(0.0, profitPct)                  // only positive progress
-float xpNow   = posPct * (baseXPPer10p / 0.10)            // 10% -> baseXPPer10p
+float xpNeedLocal = baseXPPer10p * 1.0
+float xpRemaining = xpNow
+int lvlComputed = 1
+while xpRemaining >= xpNeedLocal
+    xpRemaining -= xpNeedLocal
+    xpNeedLocal *= levelScalar
+    lvlComputed += 1
+float xpProg = clamp(xpNeedLocal > 0 ? xpRemaining / xpNeedLocal : 0.0, 0.0, 1.0)
+float xpToNext = xpNeedLocal - xpRemaining
+
 var int   lvl    = 1
 var float xpIn   = 0.0
 var float xpNeed = baseXPPer10p * 1.0
+var int   prevLvl = 1
+var int   flash   = 0
 
-float tmp = xpNow
-while tmp >= xpNeed
-    tmp   -= xpNeed
-    xpNeed *= levelScalar
-    lvl += 1
-xpIn := tmp
-float xpProg = xpNeed > 0 ? xpIn / xpNeed : 0.0
-xpProg := math.min(math.max(xpProg, 0.0), 1.0)
+if entryChanged
+    lvl := 1
+    prevLvl := 1
+    xpIn := 0.0
+    xpNeed := baseXPPer10p * 1.0
+    flash := flashBars
 
-// flash on level up
-var int prevLvl = lvl
-var int flash   = 0
 if barstate.isfirst
     prevLvl := lvl
-if lvl > prevLvl
+
+if lvlComputed > prevLvl
     flash := flashBars
-    prevLvl := lvl
-else
+else if barstate.isnew
     flash := math.max(0, flash - 1)
 
+lvl := lvlComputed
+xpNeed := xpNeedLocal
+xpIn := xpRemaining
+prevLvl := lvl
+bool xpNearLevel = xpProg >= 0.90
+
+var table xpTable = na
+var string xpLastPos = ""
 if showXP
-    var table xp = na
-    var string lastPos = ""
     if barstate.isfirst
-        lastPos := xpPosStr
-    if xpPosStr != lastPos or na(xp)
-        if not na(xp)
-            table.delete(xp)
-        xp := table.new(posFromStr(xpPosStr), xpSegments + 2, 3, border_width=1, border_color=goldBorder)
-        lastPos := xpPosStr
-    if barstate.islast and not na(xp)
-        string header = "Level " + str.tostring(lvl) + " — " + charName + "  " + (profitPct >= 0 ? "🐂" : "🐻")
-        table.cell(xp, 0, 0, header, text_color=textC, text_size=size.normal, bgcolor=bgBase)
+        xpLastPos := xpPosStr
+    if xpPosStr != xpLastPos or na(xpTable)
+        if not na(xpTable)
+            table.delete(xpTable)
+        xpTable := table.new(resolvePosition(xpPosStr), xpSegments + 2, 3, border_width=1, border_color=goldBorder)
+        xpLastPos := xpPosStr
+    if barstate.islast and not na(xpTable)
+        color xpHeaderBg = xpNearLevel ? color.new(warnCol, 75) : bgBase
+        string header = "Level " + str.tostring(lvl) + " — " + charName + "  " + profitEmoji
+        if not na(bestProfitPct)
+            header += " | Peak " + fmtPercent(bestProfitPct)
+        table.cell(xpTable, 0, 0, header, text_color=textC, text_size=size.normal, bgcolor=xpHeaderBg)
         int filled = int(math.round(xpProg * xpSegments))
         for s = 0 to xpSegments - 1
             color seg = s < filled ? (flash > 0 ? goldFillLite : goldFill) : goldEmpty
             if xpTicks
-                int tickEvery = int(math.max(1, math.round(xpSegments/10)))
+                int tickEvery = int(math.max(1, math.round(xpSegments / 10)))
                 if s % tickEvery == 0
                     seg := s < filled ? color.new(goldFillLite, 0) : color.new(goldEmpty, 0)
-            table.cell(xp, 1 + s, 1, " ", bgcolor=seg)
-        table.cell(xp, 1 + xpSegments, 1, " ", bgcolor=goldBorder)
-        string footer = "XP " + str.tostring(xpIn, format.mintick) + " / " + str.tostring(xpNeed, format.mintick) + "  (" + str.tostring(xpProg, format.percent) + ")"
-        table.cell(xp, 0, 2, footer, text_color=textC, text_size=size.small, bgcolor=bgBase)
+            if xpNearLevel and s >= filled
+                seg := color.new(warnCol, 75)
+            table.cell(xpTable, 1 + s, 1, " ", bgcolor=seg)
+        table.cell(xpTable, 1 + xpSegments, 1, " ", bgcolor=goldBorder)
+        string footer = "XP " + fmtNumber(xpIn, "#.##") + " / " + fmtNumber(xpNeed, "#.##") + "  (" + fmtPercent(xpProg) + ")"
+        if not na(xpToNext)
+            footer += "  | Next " + fmtNumber(xpToNext, "#.##")
+        table.cell(xpTable, 0, 2, footer, text_color=textC, text_size=size.small, bgcolor=bgBase)
+else if not na(xpTable)
+    table.clear(xpTable)
 
 // ================== Triangle detector ==================
 float ph = ta.pivothigh(high, pivotLen, pivotLen)
@@ -230,29 +461,54 @@ bool haveLows  = enableTriangle and not na(l1) and not na(l2) and (lb1 - lb2 >= 
 
 var line dnTL = na, upTL = na
 var float projDn = na, projUp = na
+var linefill triFill = na
+var int lastUpBreakoutBar = na, lastDownBreakoutBar = na
 
 if haveHighs and haveLows
     float slopeDn = (h1 - h2) / float(hb1 - hb2)
     float slopeUp = (l1 - l2) / float(lb1 - lb2)
     bool converging = slopeDn < 0 and slopeUp > 0
-    if converging
+    float height = h2 - l2
+    float widthBars = float(math.min(hb1, lb1) - math.max(hb2, lb2))
+    bool validRange = height > syminfo.mintick * 5 and widthBars >= minBarsSpan
+    if converging and validRange
         projDn := h2 + slopeDn * float(bar_index - hb2)
         projUp := l2 + slopeUp * float(bar_index - lb2)
         if triShowLines
-            if na(dnTL)
-                dnTL := line.new(hb2, h2, bar_index, projDn, color=color.new(color.red, 0), width=2)
-            else
-                line.set_xy1(dnTL, hb2, h2)
-                line.set_xy2(dnTL, bar_index, projDn)
-            if na(upTL)
-                upTL := line.new(lb2, l2, bar_index, projUp, color=color.new(color.aqua, 0), width=2)
-            else
-                line.set_xy1(upTL, lb2, l2)
-                line.set_xy2(upTL, bar_index, projUp)
+            dnTL := ensureLine(dnTL, hb2, h2, bar_index, projDn, riskCol, 2, extend.none)
+            upTL := ensureLine(upTL, lb2, l2, bar_index, projUp, rewardCol, 2, extend.none)
+            color fillCol = themeDark ? color.new(color.gray, 85) : color.new(color.rgb(120, 120, 120), 80)
+            if na(triFill) and not na(upTL) and not na(dnTL)
+                triFill := linefill.new(upTL, dnTL, fillCol)
+            if not na(triFill)
+                linefill.set_color(triFill, fillCol)
+        else if not na(triFill)
+            linefill.delete(triFill)
+            triFill := na
         if triShowLabels
             bool upBO   = not na(projDn) and close > projDn
             bool downBO = not na(projUp) and close < projUp
-            if upBO
-                label.new(bar_index, high, "▲ BO", xloc=xloc.bar_index, yloc=yloc.price, textcolor=color.white, color=color.new(color.lime, 0), style=label.style_label_up)
-            if downBO
-                label.new(bar_index, low,  "▼ BO", xloc=xloc.bar_index, yloc=yloc.price, textcolor=color.white, color=color.new(color.red, 0), style=label.style_label_down)
+            if upBO and (na(lastUpBreakoutBar) or bar_index > lastUpBreakoutBar)
+                string upText = "▲ BO " + fmtPercent(percent(projDn, close))
+                ensureLabel(na, bar_index, high, upText, color.white, color.new(posCol, 0), label.style_label_up)
+                lastUpBreakoutBar := bar_index
+            if downBO and (na(lastDownBreakoutBar) or bar_index > lastDownBreakoutBar)
+                string downText = "▼ BO " + fmtPercent(percent(projUp, close))
+                ensureLabel(na, bar_index, low, downText, color.white, color.new(negCol, 0), label.style_label_down)
+                lastDownBreakoutBar := bar_index
+else
+    if triShowLines
+        if not na(dnTL)
+            line.delete(dnTL)
+            dnTL := na
+        if not na(upTL)
+            line.delete(upTL)
+            upTL := na
+    if not na(triFill)
+        linefill.delete(triFill)
+        triFill := na
+    projDn := na
+    projUp := na
+    lastUpBreakoutBar := na
+    lastDownBreakoutBar := na
+
