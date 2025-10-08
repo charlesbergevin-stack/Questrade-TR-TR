@@ -9,7 +9,7 @@ fmtPercent(float value) => na(value) ? "—" : str.tostring(value, format.percen
 fmtPrice(float value) => na(value) ? "—" : str.tostring(value, format.mintick)
 fmtNumber(float value, string pattern) => na(value) ? "—" : str.tostring(value, pattern)
 
-ensureLine(line ln, float x1, float y1, float x2, float y2, color col, int width, extend extendMode) =>
+ensureLine(line ln, float x1, float y1, float x2, float y2, color col, int width, line.extend extendMode) =>
     if na(ln)
         line.new(x1, y1, x2, y2, extend=extendMode, width=width, color=col)
     else
@@ -19,7 +19,7 @@ ensureLine(line ln, float x1, float y1, float x2, float y2, color col, int width
         line.set_width(ln, width)
         ln
 
-ensureLabel(label lb, float x, float y, string text, color txtCol, color bgCol, label_style style) =>
+ensureLabel(label lb, float x, float y, string text, color txtCol, color bgCol, label.style style) =>
     if not na(lb)
         label.delete(lb)
     label.new(x, y, text, xloc=xloc.bar_index, yloc=yloc.price, textcolor=txtCol, color=bgCol, style=style)
